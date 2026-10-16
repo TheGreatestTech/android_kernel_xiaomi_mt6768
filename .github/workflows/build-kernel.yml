@@ -17,7 +17,7 @@ on:
     - cron: '0 0 * * *'
 
 permissions:
-  contents: write  # needed to create releases
+  contents: write
 
 jobs:
   build:
@@ -26,7 +26,7 @@ jobs:
       - name: Checkout Kernel Source
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # needed so git describe works on your repo too
+          fetch-depth: 0
 
       - name: Install Dependencies
         run: |
@@ -39,8 +39,8 @@ jobs:
         id: vars
         run: |
           if [ "${{ github.event_name }}" == "schedule" ]; then
-            echo "kernelsu=true"  >> $GITHUB_OUTPUT
-            echo "nomount=true"   >> $GITHUB_OUTPUT
+            echo "kernelsu=true" >> $GITHUB_OUTPUT
+            echo "nomount=true"  >> $GITHUB_OUTPUT
           else
             echo "kernelsu=${{ github.event.inputs.kernelsu }}" >> $GITHUB_OUTPUT
             echo "nomount=${{ github.event.inputs.nomount }}"   >> $GITHUB_OUTPUT
@@ -91,22 +91,28 @@ jobs:
         env:
           GIT_TERMINAL_PROMPT: 0
         run: |
-          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git anykernel
-          rm -rf anykernel/.git
+          # Use the AnyKernel3 folder that's already in YOUR repo
+          # (assumes it lives at ./anykernel3/ — adjust path if different)
+          AK3_DIR="Zyte-Kernel"
 
-          # Copy kernel image
-          if [ -f "out/arch/arm64/boot/Image.gz-dtb" ]; then
-            cp out/arch/arm64/boot/Image.gz-dtb anykernel/
-          else
-            cp out/arch/arm64/boot/Image anykernel/Image
-            gzip -9 anykernel/Image
-            cat out/arch/arm64/boot/dts/mediatek/mt6768.dtb >> anykernel/Image.gz
-            mv anykernel/Image.gz anykernel/Image.gz-dtb
+          if [ ! -d "$AK3_DIR" ]; then
+            echo "ERROR: $AK3_DIR not found in repo root. Check your folder name."
+            exit 1
           fi
 
-          # Copy DTB
+          # Copy fresh kernel image — always overwrite whatever was committed
+          if [ -f "out/arch/arm64/boot/Image.gz-dtb" ]; then
+            cp out/arch/arm64/boot/Image.gz-dtb "$AK3_DIR/"
+          else
+            cp out/arch/arm64/boot/Image "$AK3_DIR/Image"
+            gzip -9 "$AK3_DIR/Image"
+            cat out/arch/arm64/boot/dts/mediatek/mt6768.dtb >> "$AK3_DIR/Image.gz"
+            mv "$AK3_DIR/Image.gz" "$AK3_DIR/Image.gz-dtb"
+          fi
+
+          # Copy fresh DTB
           if [ -f "out/arch/arm64/boot/dts/mediatek/mt6768.dtb" ]; then
-            cp out/arch/arm64/boot/dts/mediatek/mt6768.dtb anykernel/dtb
+            cp out/arch/arm64/boot/dts/mediatek/mt6768.dtb "$AK3_DIR/dtb"
           fi
 
           # Resolve versions
@@ -121,13 +127,21 @@ jobs:
             NOMOUNT_VER=$(git -C drivers/kernelsu describe --tags --always 2>/dev/null || echo "dev")
           fi
 
-          # Build date for the release tag
           BUILD_DATE=$(date -u +"%Y%m%d-%H%M")
 
-          # Construct names
-          ZIP_NAME="ZyteKernel-selene-KernelSU-${KSU_VER}-NoMount-${NOMOUNT_VER}-${BUILD_DATE}.zip"
+          if [ "${{ steps.vars.outputs.kernelsu }}" == "true" ]; then
+            ZIP_NAME="ZyteKernel-selene-KernelSU-${KSU_VER}-NoMount-${NOMOUNT_VER}-${BUILD_DATE}.zip"
+          else
+            ZIP_NAME="ZyteKernel-selene-NoMods-${BUILD_DATE}.zip"
+          fi
+
           TAG_NAME="ZyteKernel-${BUILD_DATE}"
-          RELEASE_TITLE="ZyteKernel selene | KSU ${KSU_VER} | NoMount ${NOMOUNT_VER} | ${BUILD_DATE}"
+
+          if [ "${{ steps.vars.outputs.kernelsu }}" == "true" ]; then
+            RELEASE_TITLE="ZyteKernel selene | KSU ${KSU_VER} | NoMount ${NOMOUNT_VER} | ${BUILD_DATE}"
+          else
+            RELEASE_TITLE="ZyteKernel selene | No Mods | ${BUILD_DATE}"
+          fi
 
           echo "ZIP_NAME=$ZIP_NAME"           >> $GITHUB_ENV
           echo "TAG_NAME=$TAG_NAME"           >> $GITHUB_ENV
@@ -136,8 +150,8 @@ jobs:
           echo "NOMOUNT_VER=$NOMOUNT_VER"     >> $GITHUB_ENV
           echo "BUILD_DATE=$BUILD_DATE"       >> $GITHUB_ENV
 
-          # Zip the CONTENTS of anykernel, not the folder itself — this is what fixes the double-zip
-          cd anykernel
+          # Zip the CONTENTS of AK3 dir — not the dir itself
+          cd "$AK3_DIR"
           zip -r9 "../${ZIP_NAME}" .
           cd ..
 
@@ -149,14 +163,14 @@ jobs:
           body: |
             ## ZyteKernel for Redmi 10 Prime (selene)
 
-            | Property     | Value                  |
-            |-------------|------------------------|
-            | KernelSU    | `${{ env.KSU_VER }}`   |
-            | NoMount     | `${{ env.NOMOUNT_VER }}`|
-            | Build Date  | `${{ env.BUILD_DATE }}` |
-            | Device      | Redmi 10 Prime (selene) |
+            | Property    | Value                   |
+            |-------------|-------------------------|
+            | KernelSU    | `${{ env.KSU_VER }}`    |
+            | NoMount     | `${{ env.NOMOUNT_VER }}` |
+            | Build Date  | `${{ env.BUILD_DATE }}`  |
+            | Device      | Redmi 10 Prime (selene)  |
 
-            Flash via any custom recovery (TWRP / PBRP).
+            Flash via TWRP / PBRP.
           files: ${{ env.ZIP_NAME }}
           draft: false
           prerelease: false
