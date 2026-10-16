@@ -123,8 +123,8 @@ jobs:
             KSU_VER=$(git -C KernelSU describe --tags --always 2>/dev/null || echo "custom")
           fi
 
-          if [ -d "drivers/kernelsu" ]; then
-            NOMOUNT_VER=$(git -C drivers/kernelsu describe --tags --always 2>/dev/null || echo "dev")
+          if [ -d "NoMount" ]; then
+            NOMOUNT_VER=$(git -C NoMount describe --tags --always 2>/dev/null || echo "dev")
           fi
 
           BUILD_DATE=$(date -u +"%Y%m%d-%H%M")
