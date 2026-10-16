@@ -14,7 +14,7 @@ on:
         required: true
         default: true
   schedule:
-    - cron: '0 0 * * *' # Runs daily at midnight UTC
+    - cron: '0 0 * * *'
 
 jobs:
   check-updates:
@@ -25,10 +25,6 @@ jobs:
       - name: Check for upstream updates
         id: check
         run: |
-          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            echo "should_build=true" >> $GITHUB_OUTPUT
-            exit 0
-          fi
           echo "should_build=true" >> $GITHUB_OUTPUT
 
   build:
@@ -42,17 +38,19 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y bc bison flex libssl-dev make libelf-dev build-essential git curl zip gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
+          sudo apt-get install -y bc bison flex libssl-dev make libelf-dev \
+            build-essential git curl zip \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
 
       - name: Determine Input Flags
         id: vars
         run: |
           if [ "${{ github.event_name }}" == "schedule" ]; then
             echo "kernelsu=true" >> $GITHUB_OUTPUT
-            echo "nomount=true" >> $GITHUB_OUTPUT
+            echo "nomount=true"  >> $GITHUB_OUTPUT
           else
             echo "kernelsu=${{ github.event.inputs.kernelsu }}" >> $GITHUB_OUTPUT
-            echo "nomount=${{ github.event.inputs.nomount }}" >> $GITHUB_OUTPUT
+            echo "nomount=${{ github.event.inputs.nomount }}"   >> $GITHUB_OUTPUT
           fi
 
       - name: Setup KernelSU and NoMount
@@ -60,7 +58,7 @@ jobs:
           if [ "${{ steps.vars.outputs.kernelsu }}" == "true" ]; then
             echo "==> Setting up KernelSU..."
             curl -LSs "https://raw.githubusercontent.com/backslashxx/KernelSU/refs/heads/master/kernel/setup.sh" | bash -
-            
+
             if [ "${{ steps.vars.outputs.nomount }}" == "true" ]; then
               echo "==> Setting up NoMount..."
               curl -sSL "https://raw.githubusercontent.com/maxsteeel/nomount/refs/heads/dev/kernel/setup.sh" | bash -
@@ -72,7 +70,7 @@ jobs:
           CONFIG_FILE="arch/arm64/configs/vendor/selene.config"
           if [ "${{ steps.vars.outputs.kernelsu }}" == "true" ] && [ -f "$CONFIG_FILE" ]; then
             echo "==> Appending KernelSU flags to $CONFIG_FILE"
-            echo "CONFIG_KSU=y" >> "$CONFIG_FILE"
+            echo "CONFIG_KSU=y"                      >> "$CONFIG_FILE"
             echo "CONFIG_KSU_HACK_ARM64_BRANCH_LINK=y" >> "$CONFIG_FILE"
           fi
 
@@ -87,50 +85,50 @@ jobs:
         run: |
           export ARCH=arm64
           export SUBARCH=arm64
-          
+
           make O=out vendor/mt6768_defconfig CC=clang HOSTCC=gcc
           ./scripts/kconfig/merge_config.sh -m -O out out/.config arch/arm64/configs/vendor/selene.config
           yes "" | make O=out olddefconfig CC=clang HOSTCC=gcc
-          make O=out -j$(nproc) CC=clang HOSTCC=gcc CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+          make O=out -j$(nproc) CC=clang HOSTCC=gcc \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
 
       - name: Package AnyKernel3 Zip with Versions
+        env:
+          GIT_TERMINAL_PROMPT: 0
         run: |
-          git clone https://github.com/osm0sis/AnyKernel3 -b master anykernel
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git anykernel
           rm -rf anykernel/.git
-          
+
           if [ -f "out/arch/arm64/boot/Image.gz-dtb" ]; then
             cp out/arch/arm64/boot/Image.gz-dtb anykernel/
           else
-            cat out/arch/arm64/boot/Image > anykernel/Image
+            cp out/arch/arm64/boot/Image anykernel/Image
             gzip -9 anykernel/Image
             cat out/arch/arm64/boot/dts/mediatek/mt6768.dtb >> anykernel/Image.gz
             mv anykernel/Image.gz anykernel/Image.gz-dtb
           fi
-          
+
           if [ -f "out/arch/arm64/boot/dts/mediatek/mt6768.dtb" ]; then
             cp out/arch/arm64/boot/dts/mediatek/mt6768.dtb anykernel/dtb
           fi
-          
+
           KSU_VER="none"
           NOMOUNT_VER="none"
-          
+
           if [ -d "KernelSU" ]; then
-            cd KernelSU
-            KSU_VER=$(git describe --tags --always 2>/dev/null || echo "v-custom")
-            cd ..
+            KSU_VER=$(git -C KernelSU describe --tags --always 2>/dev/null || echo "v-custom")
           fi
-          
+
           if [ -d "drivers/kernelsu" ]; then
-            cd drivers/kernelsu
-            NOMOUNT_VER=$(git describe --tags --always 2>/dev/null || echo "dev")
-            cd ..
+            NOMOUNT_VER=$(git -C drivers/kernelsu describe --tags --always 2>/dev/null || echo "dev")
           fi
-          
+
           ZIP_NAME="ZyteKernel-selene-KernelSU-${KSU_VER}-NoMount-${NOMOUNT_VER}.zip"
           echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
-          
+
           cd anykernel
-          zip -r9 "../$ZIP_NAME" *
+          zip -r9 "../$ZIP_NAME" .
           cd ..
 
       - name: Upload Flashable Zip Artifact
