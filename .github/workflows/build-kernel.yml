@@ -95,7 +95,7 @@ jobs:
 
       - name: Package AnyKernel3 Zip with Versions
         run: |
-          git clone https://github.com/KernelSU/AnyKernel3 -b master anykernel
+          git clone https://github.com/osm0sis/AnyKernel3 -b master anykernel
           rm -rf anykernel/.git
           
           if [ -f "out/arch/arm64/boot/Image.gz-dtb" ]; then
