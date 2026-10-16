@@ -16,24 +16,17 @@ on:
   schedule:
     - cron: '0 0 * * *'
 
-jobs:
-  check-updates:
-    runs-on: ubuntu-latest
-    outputs:
-      should_build: ${{ steps.check.outputs.should_build }}
-    steps:
-      - name: Check for upstream updates
-        id: check
-        run: |
-          echo "should_build=true" >> $GITHUB_OUTPUT
+permissions:
+  contents: write  # needed to create releases
 
+jobs:
   build:
-    needs: check-updates
-    if: needs.check-updates.outputs.should_build == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Kernel Source
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # needed so git describe works on your repo too
 
       - name: Install Dependencies
         run: |
@@ -46,8 +39,8 @@ jobs:
         id: vars
         run: |
           if [ "${{ github.event_name }}" == "schedule" ]; then
-            echo "kernelsu=true" >> $GITHUB_OUTPUT
-            echo "nomount=true"  >> $GITHUB_OUTPUT
+            echo "kernelsu=true"  >> $GITHUB_OUTPUT
+            echo "nomount=true"   >> $GITHUB_OUTPUT
           else
             echo "kernelsu=${{ github.event.inputs.kernelsu }}" >> $GITHUB_OUTPUT
             echo "nomount=${{ github.event.inputs.nomount }}"   >> $GITHUB_OUTPUT
@@ -70,7 +63,7 @@ jobs:
           CONFIG_FILE="arch/arm64/configs/vendor/selene.config"
           if [ "${{ steps.vars.outputs.kernelsu }}" == "true" ] && [ -f "$CONFIG_FILE" ]; then
             echo "==> Appending KernelSU flags to $CONFIG_FILE"
-            echo "CONFIG_KSU=y"                      >> "$CONFIG_FILE"
+            echo "CONFIG_KSU=y"                        >> "$CONFIG_FILE"
             echo "CONFIG_KSU_HACK_ARM64_BRANCH_LINK=y" >> "$CONFIG_FILE"
           fi
 
@@ -93,13 +86,15 @@ jobs:
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32=arm-linux-gnueabi-
 
-      - name: Package AnyKernel3 Zip with Versions
+      - name: Package AnyKernel3 Zip
+        id: package
         env:
           GIT_TERMINAL_PROMPT: 0
         run: |
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git anykernel
           rm -rf anykernel/.git
 
+          # Copy kernel image
           if [ -f "out/arch/arm64/boot/Image.gz-dtb" ]; then
             cp out/arch/arm64/boot/Image.gz-dtb anykernel/
           else
@@ -109,30 +104,59 @@ jobs:
             mv anykernel/Image.gz anykernel/Image.gz-dtb
           fi
 
+          # Copy DTB
           if [ -f "out/arch/arm64/boot/dts/mediatek/mt6768.dtb" ]; then
             cp out/arch/arm64/boot/dts/mediatek/mt6768.dtb anykernel/dtb
           fi
 
+          # Resolve versions
           KSU_VER="none"
           NOMOUNT_VER="none"
 
           if [ -d "KernelSU" ]; then
-            KSU_VER=$(git -C KernelSU describe --tags --always 2>/dev/null || echo "v-custom")
+            KSU_VER=$(git -C KernelSU describe --tags --always 2>/dev/null || echo "custom")
           fi
 
           if [ -d "drivers/kernelsu" ]; then
             NOMOUNT_VER=$(git -C drivers/kernelsu describe --tags --always 2>/dev/null || echo "dev")
           fi
 
-          ZIP_NAME="ZyteKernel-selene-KernelSU-${KSU_VER}-NoMount-${NOMOUNT_VER}.zip"
-          echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
+          # Build date for the release tag
+          BUILD_DATE=$(date -u +"%Y%m%d-%H%M")
 
+          # Construct names
+          ZIP_NAME="ZyteKernel-selene-KernelSU-${KSU_VER}-NoMount-${NOMOUNT_VER}-${BUILD_DATE}.zip"
+          TAG_NAME="ZyteKernel-${BUILD_DATE}"
+          RELEASE_TITLE="ZyteKernel selene | KSU ${KSU_VER} | NoMount ${NOMOUNT_VER} | ${BUILD_DATE}"
+
+          echo "ZIP_NAME=$ZIP_NAME"           >> $GITHUB_ENV
+          echo "TAG_NAME=$TAG_NAME"           >> $GITHUB_ENV
+          echo "RELEASE_TITLE=$RELEASE_TITLE" >> $GITHUB_ENV
+          echo "KSU_VER=$KSU_VER"             >> $GITHUB_ENV
+          echo "NOMOUNT_VER=$NOMOUNT_VER"     >> $GITHUB_ENV
+          echo "BUILD_DATE=$BUILD_DATE"       >> $GITHUB_ENV
+
+          # Zip the CONTENTS of anykernel, not the folder itself — this is what fixes the double-zip
           cd anykernel
-          zip -r9 "../$ZIP_NAME" .
+          zip -r9 "../${ZIP_NAME}" .
           cd ..
 
-      - name: Upload Flashable Zip Artifact
-        uses: actions/upload-artifact@v4
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
-          name: ZyteKernel-Selene-Zip
-          path: ZyteKernel-selene-*.zip
+          tag_name: ${{ env.TAG_NAME }}
+          name: ${{ env.RELEASE_TITLE }}
+          body: |
+            ## ZyteKernel for Redmi 10 Prime (selene)
+
+            | Property     | Value                  |
+            |-------------|------------------------|
+            | KernelSU    | `${{ env.KSU_VER }}`   |
+            | NoMount     | `${{ env.NOMOUNT_VER }}`|
+            | Build Date  | `${{ env.BUILD_DATE }}` |
+            | Device      | Redmi 10 Prime (selene) |
+
+            Flash via any custom recovery (TWRP / PBRP).
+          files: ${{ env.ZIP_NAME }}
+          draft: false
+          prerelease: false
