@@ -144,26 +144,6 @@ static int ktd_find_bit(int x)
 	return i+1;
 }
 
-static u8 ktd3137_hbm_mode_value(enum backlight_hbm_mode hbm_mode)
-{
-	switch (hbm_mode) {
-	case HBM_MODE_LEVEL2:
-		return 0xE0; /* 27.4 mA; preserve REG_MODE bit 0 */
-	case HBM_MODE_LEVEL1:
-		return 0xC8; /* 25.0 mA; preserve REG_MODE bit 0 */
-	case HBM_MODE_DEFAULT:
-	default:
-		return 0xA8; /* 21.8 mA; preserve REG_MODE bit 0 */
-	}
-}
-
-static void ktd3137_set_hbm_current(struct ktd3137_chip *chip,
-				     enum backlight_hbm_mode hbm_mode)
-{
-	ktd3137_masked_write(chip->client, REG_MODE, 0xF8,
-			     ktd3137_hbm_mode_value(hbm_mode));
-}
-
 static void ktd_parse_dt(struct device *dev, struct ktd3137_chip *chip)
 {
 	struct device_node *np = dev->of_node;
@@ -524,7 +504,6 @@ static void ktd3137_check_status(struct ktd3137_chip *chip)
 			ktd3137_hwen_pin_ctrl(chip, 0);
 			ktd3137_hwen_pin_ctrl(chip, 1);
 			ktd3137_backlight_init(chip);
-			ktd3137_set_hbm_current(chip, ktd_hbm_mode);
 		}
 
 	}
@@ -593,8 +572,16 @@ void ktd3137_brightness_set_workfunc(struct ktd3137_chip *chip, int brightness)
 		ktd3137_write_reg(chip->client, REG_MODE, 0x98);
 		mdelay(10);
 	} else {
-		ktd3137_set_hbm_current(chip, ktd_hbm_mode);
-		LOG_DBG("[%s]: ktd_hbm_mode = %d\n", __func__, ktd_hbm_mode);
+		if (ktd_hbm_mode == 3) {
+			ktd3137_write_reg(bkl_chip->client, REG_MODE, 0xE1);//27.4mA
+			LOG_DBG("[%s]: ktd_hbm_mode = %d\n", __func__, ktd_hbm_mode);
+		} else if (ktd_hbm_mode == 2) {
+			ktd3137_write_reg(bkl_chip->client, REG_MODE, 0xC9);//25mA
+			LOG_DBG("[%s]: ktd_hbm_mode = %d\n", __func__, ktd_hbm_mode);
+		} else {
+			ktd3137_write_reg(chip->client, REG_MODE, 0xA9);//21.8mA
+			LOG_DBG("[%s]: ktd_hbm_mode = %d\n", __func__, ktd_hbm_mode);
+		}
 	}
 
 	if (pdata->linear_backlight == 1) {
@@ -635,8 +622,23 @@ int ktd_hbm_set(enum backlight_hbm_mode hbm_mode)
 
 	ktd_hbm_mode = hbm_mode;
 
-	ktd3137_set_hbm_current(bkl_chip, hbm_mode);
-	LOG_DBG("This is hbm mode %d\n", hbm_mode);
+	switch (hbm_mode) {
+	case HBM_MODE_DEFAULT:
+		ktd3137_write_reg(bkl_chip->client, REG_MODE, 0xA9);//21.8mA
+		LOG_DBG("This is hbm mode 1\n");
+		break;
+	case HBM_MODE_LEVEL1:
+		ktd3137_write_reg(bkl_chip->client, REG_MODE, 0xC9);//25mA
+		LOG_DBG("This is hbm mode 2\n");
+		break;
+	case HBM_MODE_LEVEL2:
+		ktd3137_write_reg(bkl_chip->client, REG_MODE, 0xE1);//27.4mA
+		LOG_DBG("This is hbm mode 3\n");
+		break;
+	default:
+		LOG_DBG("This isn't hbm mode\n");
+		break;
+	 }
 	ktd3137_read_reg(bkl_chip->client, 0x02, &value);
 	LOG_DBG("[bkl]%s hbm_mode=%d, value = %d\n", __func__, hbm_mode, value);
 	return 0;
@@ -1068,7 +1070,7 @@ static int ktd3137_probe(struct i2c_client *client,
 	chip->pdata = pdata;
 	chip->dev = &client->dev;
 
-	ktd_hbm_mode = HBM_MODE_DEFAULT;
+	ktd_hbm_mode = 0;
 
 	ktd3137_dev = ktd3137_device_create(chip, "ktd");
 	if (IS_ERR(ktd3137_dev)) {
