@@ -92,6 +92,12 @@ cd -- "$repo_root"
 for patch_file in "${patch_files[@]}"; do
 	patch_name="${patch_file#"$repo_root"/}"
 
+	# Skip NoMount patch — handled by curl setup script
+	if [[ "$patch_name" == *"NoMount"* ]]; then
+		printf 'skipping %s (handled by setup script)\n' "$patch_name"
+		continue
+	fi
+
 	# 1. Clean apply — not yet applied
 	if git apply --check -- "$patch_file" >/dev/null 2>&1; then
 		if ((dry_run)); then
