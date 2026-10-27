@@ -91,6 +91,8 @@ cd -- "$repo_root"
 
 for patch_file in "${patch_files[@]}"; do
 	patch_name="${patch_file#"$repo_root"/}"
+
+	# 1. Clean apply — not yet applied
 	if git apply --check -- "$patch_file" >/dev/null 2>&1; then
 		if ((dry_run)); then
 			printf 'would apply %s\n' "$patch_name"
@@ -98,8 +100,16 @@ for patch_file in "${patch_files[@]}"; do
 			git apply -- "$patch_file"
 			printf 'applied %s\n' "$patch_name"
 		fi
+
+	# 2. Already applied via git apply (exact reverse match)
 	elif git apply --reverse --check -- "$patch_file" >/dev/null 2>&1; then
-		printf 'already applied %s\n' "$patch_name"
+		printf 'already applied (git) %s\n' "$patch_name"
+
+	# 3. Already applied via other means (e.g. curl setup script) — use patch --dry-run
+	elif patch --dry-run -p1 -R < "$patch_file" >/dev/null 2>&1; then
+		printf 'already applied (patch) %s\n' "$patch_name"
+
+	# 4. Truly cannot apply
 	else
 		die "cannot apply or reverse-check patch: $patch_name"
 	fi
