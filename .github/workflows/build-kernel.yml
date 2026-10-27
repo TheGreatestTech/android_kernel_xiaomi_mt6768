@@ -28,6 +28,11 @@ on:
         type: boolean
         required: true
         default: true
+      susfs:
+        description: 'Include SUSFS (requires KernelSU)'
+        type: boolean
+        required: true
+        default: true
 
 permissions:
   contents: write
@@ -47,7 +52,7 @@ jobs:
         with:
           path: /var/cache/apt/archives
           key: apt-${{ runner.os }}-cross-toolchain
-          restore-keys: apt-${{ runner.os }}-    
+          restore-keys: apt-${{ runner.os }}-
 
       - name: Install Dependencies
         run: |
@@ -62,9 +67,11 @@ jobs:
           if [ "${{ github.event_name }}" == "schedule" ]; then
             echo "kernelsu=true" >> $GITHUB_OUTPUT
             echo "nomount=true"  >> $GITHUB_OUTPUT
+            echo "susfs=true"    >> $GITHUB_OUTPUT
           else
             echo "kernelsu=${{ github.event.inputs.kernelsu }}" >> $GITHUB_OUTPUT
             echo "nomount=${{ github.event.inputs.nomount }}"   >> $GITHUB_OUTPUT
+            echo "susfs=${{ github.event.inputs.susfs }}"       >> $GITHUB_OUTPUT
           fi
 
       - name: Setup KernelSU and NoMount
@@ -77,15 +84,6 @@ jobs:
               echo "==> Setting up NoMount..."
               curl -sSL "https://raw.githubusercontent.com/maxsteeel/nomount/refs/heads/dev/kernel/setup.sh" | bash -
             fi
-          fi
-
-      - name: Configure Kernel Flags
-        run: |
-          CONFIG_FILE="arch/arm64/configs/vendor/selene.config"
-          if [ "${{ steps.vars.outputs.kernelsu }}" == "true" ] && [ -f "$CONFIG_FILE" ]; then
-            echo "==> Appending KernelSU flags to $CONFIG_FILE"
-            echo "CONFIG_KSU=y"                        >> "$CONFIG_FILE"
-            echo "CONFIG_KSU_HACK_ARM64_BRANCH_LINK=y" >> "$CONFIG_FILE"
           fi
 
       - name: Install Clang
@@ -103,6 +101,18 @@ jobs:
           make O=out vendor/mt6768_defconfig CC=clang HOSTCC=gcc
           ./scripts/kconfig/merge_config.sh -m -O out out/.config arch/arm64/configs/vendor/selene.config
           yes "" | make O=out olddefconfig CC=clang HOSTCC=gcc
+
+          if [ "${{ steps.vars.outputs.kernelsu }}" == "true" ]; then
+            if [ -f "apply-kernel-patches.sh" ] && [ "${{ steps.vars.outputs.susfs }}" == "true" ]; then
+              echo "==> Applying KSU patches (NoMount + SUSFS)..."
+              bash apply-kernel-patches.sh --config out/.config
+            else
+              echo "==> KernelSU only, appending config..."
+              echo "CONFIG_KSU=y"                        >> out/.config
+              echo "CONFIG_KSU_HACK_ARM64_BRANCH_LINK=y" >> out/.config
+            fi
+          fi
+
           make O=out -j$(nproc) CC=clang HOSTCC=gcc \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32=arm-linux-gnueabi-
@@ -115,7 +125,7 @@ jobs:
           AK3_DIR="Zyte-Kernel"
 
           if [ ! -d "$AK3_DIR" ]; then
-            echo "ERROR: $AK3_DIR not found in repo root. Check your folder name."
+            echo "ERROR: $AK3_DIR not found in repo root."
             exit 1
           fi
 
@@ -139,6 +149,7 @@ jobs:
           # Resolve versions
           KSU_VER="none"
           NOMOUNT_VER="none"
+          SUSFS_VER="none"
           ROM_TYPE="${{ github.event.inputs.rom_type }}"
           BRANCH="${{ github.event.inputs.branch }}"
 
@@ -150,11 +161,21 @@ jobs:
             NOMOUNT_VER=$(git -C NoMount describe --tags --always 2>/dev/null || echo "dev")
           fi
 
+          if [ -f "patches/0002-SUSFS-2.3.0-Deinlined.patch" ]; then
+            SUSFS_VER="2.3.0"
+          fi
+
           BUILD_DATE=$(date -u +"%Y%m%d-%H%M")
 
+          # Build zip/release name
+          SUSFS_TAG=""
+          NOMOUNT_TAG=""
+          [ "${{ steps.vars.outputs.susfs }}" == "true" ] && SUSFS_TAG="-SUSFS-${SUSFS_VER}"
+          [ "${{ steps.vars.outputs.nomount }}" == "true" ] && NOMOUNT_TAG="-NoMount-${NOMOUNT_VER}"
+
           if [ "${{ steps.vars.outputs.kernelsu }}" == "true" ]; then
-            ZIP_NAME="ZyteKernel-selene-${ROM_TYPE}-KernelSU-${KSU_VER}-NoMount-${NOMOUNT_VER}-${BUILD_DATE}.zip"
-            RELEASE_TITLE="ZyteKernel selene | ${ROM_TYPE} | KSU ${KSU_VER} | NoMount ${NOMOUNT_VER} | ${BUILD_DATE}"
+            ZIP_NAME="ZyteKernel-selene-${ROM_TYPE}-KSU-${KSU_VER}${NOMOUNT_TAG}${SUSFS_TAG}-${BUILD_DATE}.zip"
+            RELEASE_TITLE="ZyteKernel selene | ${ROM_TYPE} | KSU ${KSU_VER}${NOMOUNT_TAG}${SUSFS_TAG} | ${BUILD_DATE}"
           else
             ZIP_NAME="ZyteKernel-selene-${ROM_TYPE}-NoMods-${BUILD_DATE}.zip"
             RELEASE_TITLE="ZyteKernel selene | ${ROM_TYPE} | No Mods | ${BUILD_DATE}"
@@ -167,9 +188,10 @@ jobs:
           echo "RELEASE_TITLE=$RELEASE_TITLE" >> $GITHUB_ENV
           echo "KSU_VER=$KSU_VER"             >> $GITHUB_ENV
           echo "NOMOUNT_VER=$NOMOUNT_VER"     >> $GITHUB_ENV
-          echo "BUILD_DATE=$BUILD_DATE"       >> $GITHUB_ENV
+          echo "SUSFS_VER=$SUSFS_VER"         >> $GITHUB_ENV
           echo "ROM_TYPE=$ROM_TYPE"           >> $GITHUB_ENV
           echo "BRANCH=$BRANCH"               >> $GITHUB_ENV
+          echo "BUILD_DATE=$BUILD_DATE"       >> $GITHUB_ENV
 
           cd "$AK3_DIR"
           zip -r9 "../${ZIP_NAME}" .
@@ -183,14 +205,15 @@ jobs:
           body: |
             ## ZyteKernel for Redmi 10 Prime (selene)
 
-            | Property    | Value                                        |
-            |-------------|----------------------------------------------|
-            | ROM Type    | `${{ env.ROM_TYPE }}`                        |
-            | Branch      | `${{ env.BRANCH }}`                          |
-            | KernelSU    | `${{ env.KSU_VER }}`                         |
-            | NoMount     | `${{ env.NOMOUNT_VER }}`                     |
-            | Build Date  | `${{ env.BUILD_DATE }}`                      |
-            | Device      | Redmi 10 Prime (selene)                      |
+            | Property    | Value                          |
+            |-------------|--------------------------------|
+            | ROM Type    | `${{ env.ROM_TYPE }}`          |
+            | Branch      | `${{ env.BRANCH }}`            |
+            | KernelSU    | `${{ env.KSU_VER }}`           |
+            | NoMount     | `${{ env.NOMOUNT_VER }}`       |
+            | SUSFS       | `${{ env.SUSFS_VER }}`         |
+            | Build Date  | `${{ env.BUILD_DATE }}`        |
+            | Device      | Redmi 10 Prime (selene)        |
 
             ### Flash Instructions
             1. Boot into OrangeFox / TWRP
