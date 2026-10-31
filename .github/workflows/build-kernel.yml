@@ -1,226 +1,148 @@
-name: Build Redmi 10 Kernel
+name: Build Zyte Kernel
 
 on:
   workflow_dispatch:
     inputs:
-      branch:
-        description: 'Kernel source branch'
-        type: string
+      build_variant:
+        description: 'Select Build Variant'
         required: true
-        default: 'lineage-24.0'
-      rom_type:
-        description: 'ROM type (shown in release name)'
+        default: 'ksu_nomount'
         type: choice
-        required: true
-        default: 'LineageOS'
         options:
-          - LineageOS
-          - OneUI
-          - AOSP
-          - Custom
-      kernelsu:
-        description: 'Include KernelSU'
-        type: boolean
-        required: true
-        default: true
-      nomount:
-        description: 'Include NoMount (requires KernelSU)'
-        type: boolean
-        required: true
-        default: true
-      susfs:
-        description: 'Include SUSFS (requires KernelSU)'
-        type: boolean
-        required: true
-        default: true
-
-permissions:
-  contents: write
+          - base
+          - ksu
+          - ksu_nomount
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 120
+
     steps:
       - name: Checkout Kernel Source
         uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.inputs.branch }}
-          fetch-depth: 0
 
-      - name: Cache apt packages
+      - name: Free up disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: false
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: false
+
+      - name: Add Swap Space (Prevents OOM crashes)
+        run: |
+          sudo fallocate -l 8G /mnt/swapfile
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+          free -h
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            bc bison build-essential ccache cpio curl device-tree-compiler flex \
+            git libelf-dev libssl-dev lz4 make python3 rsync unzip zip zstd \
+            libncurses-dev gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
+
+      # ---------------------------------------------------------
+      # CACHE 1: Clang Toolchain
+      # ---------------------------------------------------------
+      - name: Cache Clang Toolchain
+        id: cache-clang
         uses: actions/cache@v4
         with:
-          path: /var/cache/apt/archives
-          key: apt-${{ runner.os }}-cross-toolchain
-          restore-keys: apt-${{ runner.os }}-
+          path: ${{ github.workspace }}/toolchain
+          key: clang-r450784e-v1
 
-      - name: Install Dependencies
+      - name: Download Clang Toolchain
+        if: steps.cache-clang.outputs.cache-hit != 'true'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y bc bison flex libssl-dev make libelf-dev \
-            build-essential git curl zip \
-            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
+          echo "Clang not found in cache, downloading..."
+          mkdir -p ${{ github.workspace }}/toolchain
+          cd ${{ github.workspace }}/toolchain
+          curl -L -o clang.tar.gz https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master-kernel-build-2022/clang-r450784e.tar.gz
+          tar -xzf clang.tar.gz
+          rm clang.tar.gz
 
-      - name: Determine Input Flags
-        id: vars
+      - name: Set Toolchain Path
         run: |
-          if [ "${{ github.event_name }}" == "schedule" ]; then
-            echo "kernelsu=true" >> $GITHUB_OUTPUT
-            echo "nomount=true"  >> $GITHUB_OUTPUT
-            echo "susfs=true"    >> $GITHUB_OUTPUT
-          else
-            echo "kernelsu=${{ github.event.inputs.kernelsu }}" >> $GITHUB_OUTPUT
-            echo "nomount=${{ github.event.inputs.nomount }}"   >> $GITHUB_OUTPUT
-            echo "susfs=${{ github.event.inputs.susfs }}"       >> $GITHUB_OUTPUT
-          fi
+          echo "CLANG_PATH=${{ github.workspace }}/toolchain/clang-r450784e/bin" >> $GITHUB_ENV
 
-      - name: Setup KernelSU and NoMount
+      # ---------------------------------------------------------
+      # INTEGRATIONS (Conditional based on inputs)
+      # ---------------------------------------------------------
+      - name: Integrate backslashxx KernelSU
+        if: inputs.build_variant == 'ksu' || inputs.build_variant == 'ksu_nomount'
         run: |
-          if [ "${{ steps.vars.outputs.kernelsu }}" == "true" ]; then
-            echo "==> Setting up KernelSU..."
-            curl -LSs "https://raw.githubusercontent.com/backslashxx/KernelSU/refs/heads/master/kernel/setup.sh" | bash -
+          echo "Integrating backslashxx's KernelSU..."
+          curl -LSs "https://raw.githubusercontent.com/backslashxx/KernelSU/master/kernel/setup.sh" | bash -
 
-            if [ "${{ steps.vars.outputs.nomount }}" == "true" ]; then
-              echo "==> Setting up NoMount..."
-              curl -sSL "https://raw.githubusercontent.com/maxsteeel/nomount/refs/heads/dev/kernel/setup.sh" | bash -
-            fi
-          fi
+      - name: Integrate NoMount
+        if: inputs.build_variant == 'ksu_nomount'
+        run: |
+          echo "Integrating NoMount..."
+          curl https://raw.githubusercontent.com/maxsteeel/nomount/refs/heads/dev/kernel/setup.sh | bash -s dev
 
-      - name: Install Clang
-        uses: egor-tensin/setup-clang@v2.3
+      # ---------------------------------------------------------
+      # CACHE 2: Ccache for Object Files
+      # ---------------------------------------------------------
+      - name: Setup Ccache
+        uses: hendrikmuhs/ccache-action@v1.2
         with:
-          version: latest
-          platform: x64
-          cc: 1
+          key: zyte-kernel-mt6768-${{ inputs.build_variant }}
+          max-size: 2G
 
-      - name: Compile Kernel
+      - name: Configure and Build Kernel
         run: |
-          export ARCH=arm64
-          export SUBARCH=arm64
-
-          make O=out vendor/mt6768_defconfig CC=clang HOSTCC=gcc
-          ./scripts/kconfig/merge_config.sh -m -O out out/.config arch/arm64/configs/vendor/selene.config
-          yes "" | make O=out olddefconfig CC=clang HOSTCC=gcc
-
-          if [ "${{ steps.vars.outputs.kernelsu }}" == "true" ]; then
-            if [ -f "apply-kernel-patches.sh" ] && [ "${{ steps.vars.outputs.susfs }}" == "true" ]; then
-              echo "==> Applying KSU patches (NoMount + SUSFS)..."
-              bash apply-kernel-patches.sh --config out/.config
-            else
-              echo "==> KernelSU only, appending config..."
-              echo "CONFIG_KSU=y"                        >> out/.config
-              echo "CONFIG_KSU_HACK_ARM64_BRANCH_LINK=y" >> out/.config
-            fi
+          export PATH="$CLANG_PATH:$PATH"
+          
+          echo "Generating base config..."
+          make ARCH=arm64 O=out vendor/mt6768_defconfig
+          
+          echo "Appending fragment (vendor/selene.config)..."
+          cat vendor/selene.config >> out/.config
+          
+          # Conditionally append KSU and NoMount flags
+          if [ "${{ inputs.build_variant }}" == "ksu" ] || [ "${{ inputs.build_variant }}" == "ksu_nomount" ]; then
+            echo "Appending KSU flags..."
+            echo "CONFIG_KSU=y" >> out/.config
+            echo "CONFIG_KSU_HACK_ARM64_BRANCH_LINK=y" >> out/.config
           fi
+          
+          if [ "${{ inputs.build_variant }}" == "ksu_nomount" ]; then
+            echo "Appending NoMount flag..."
+            echo "CONFIG_NOMOUNT=y" >> out/.config
+          fi
+          
+          echo "Resolving dependencies..."
+          make ARCH=arm64 O=out olddefconfig
+          
+          echo "Compiling kernel with ccache..."
+          make ARCH=arm64 O=out -j$(nproc) CC="ccache clang" CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi-
 
-          make O=out -j$(nproc) CC=clang HOSTCC=gcc \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
-
-      - name: Package AnyKernel3 Zip
-        id: package
-        env:
-          GIT_TERMINAL_PROMPT: 0
+      - name: Package with AnyKernel3
         run: |
-          AK3_DIR="Zyte-Kernel"
-
-          if [ ! -d "$AK3_DIR" ]; then
-            echo "ERROR: $AK3_DIR not found in repo root."
-            exit 1
-          fi
-
-          # Copy fresh kernel image
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git anykernel
+          
           if [ -f "out/arch/arm64/boot/Image.gz-dtb" ]; then
-            cp out/arch/arm64/boot/Image.gz-dtb "$AK3_DIR/"
+            cp out/arch/arm64/boot/Image.gz-dtb anykernel/
+          elif [ -f "out/arch/arm64/boot/Image.gz" ]; then
+            cp out/arch/arm64/boot/Image.gz anykernel/
           else
-            cp out/arch/arm64/boot/Image "$AK3_DIR/Image"
-            gzip -9 "$AK3_DIR/Image"
-            cat out/arch/arm64/boot/dts/mediatek/mt6768.dtb >> "$AK3_DIR/Image.gz"
-            mv "$AK3_DIR/Image.gz" "$AK3_DIR/Image.gz-dtb"
+            cp out/arch/arm64/boot/Image anykernel/
           fi
+          
+          cd anykernel
+          zip -r9 ../Zyte-Kernel-${{ inputs.build_variant }}-AnyKernel3.zip *
 
-          # Copy fresh DTB
-          if [ -f "out/arch/arm64/boot/dts/mediatek/selene.dtbo" ]; then
-            cp out/arch/arm64/boot/dts/mediatek/selene.dtbo "$AK3_DIR/dtb"
-          elif [ -f "out/arch/arm64/boot/dts/mediatek/mt6768.dtb" ]; then
-            cp out/arch/arm64/boot/dts/mediatek/mt6768.dtb "$AK3_DIR/dtb"
-          fi
-
-          # Resolve versions
-          KSU_VER="none"
-          NOMOUNT_VER="none"
-          SUSFS_VER="none"
-          ROM_TYPE="${{ github.event.inputs.rom_type }}"
-          BRANCH="${{ github.event.inputs.branch }}"
-
-          if [ -d "KernelSU" ]; then
-            KSU_VER=$(git -C KernelSU describe --tags --always 2>/dev/null || echo "custom")
-          fi
-
-          if [ -d "NoMount" ]; then
-            NOMOUNT_VER=$(git -C NoMount describe --tags --always 2>/dev/null || echo "dev")
-          fi
-
-          if [ -f "patches/0002-SUSFS-2.3.0-Deinlined.patch" ]; then
-            SUSFS_VER="2.3.0"
-          fi
-
-          BUILD_DATE=$(date -u +"%Y%m%d-%H%M")
-
-          # Build zip/release name
-          SUSFS_TAG=""
-          NOMOUNT_TAG=""
-          [ "${{ steps.vars.outputs.susfs }}" == "true" ] && SUSFS_TAG="-SUSFS-${SUSFS_VER}"
-          [ "${{ steps.vars.outputs.nomount }}" == "true" ] && NOMOUNT_TAG="-NoMount-${NOMOUNT_VER}"
-
-          if [ "${{ steps.vars.outputs.kernelsu }}" == "true" ]; then
-            ZIP_NAME="ZyteKernel-selene-${ROM_TYPE}-KSU-${KSU_VER}${NOMOUNT_TAG}${SUSFS_TAG}-${BUILD_DATE}.zip"
-            RELEASE_TITLE="ZyteKernel selene | ${ROM_TYPE} | KSU ${KSU_VER}${NOMOUNT_TAG}${SUSFS_TAG} | ${BUILD_DATE}"
-          else
-            ZIP_NAME="ZyteKernel-selene-${ROM_TYPE}-NoMods-${BUILD_DATE}.zip"
-            RELEASE_TITLE="ZyteKernel selene | ${ROM_TYPE} | No Mods | ${BUILD_DATE}"
-          fi
-
-          TAG_NAME="ZyteKernel-${ROM_TYPE}-${BUILD_DATE}"
-
-          echo "ZIP_NAME=$ZIP_NAME"           >> $GITHUB_ENV
-          echo "TAG_NAME=$TAG_NAME"           >> $GITHUB_ENV
-          echo "RELEASE_TITLE=$RELEASE_TITLE" >> $GITHUB_ENV
-          echo "KSU_VER=$KSU_VER"             >> $GITHUB_ENV
-          echo "NOMOUNT_VER=$NOMOUNT_VER"     >> $GITHUB_ENV
-          echo "SUSFS_VER=$SUSFS_VER"         >> $GITHUB_ENV
-          echo "ROM_TYPE=$ROM_TYPE"           >> $GITHUB_ENV
-          echo "BRANCH=$BRANCH"               >> $GITHUB_ENV
-          echo "BUILD_DATE=$BUILD_DATE"       >> $GITHUB_ENV
-
-          cd "$AK3_DIR"
-          zip -r9 "../${ZIP_NAME}" .
-          cd ..
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+      - name: Upload Flashable Zip
+        uses: actions/upload-artifact@v4
         with:
-          tag_name: ${{ env.TAG_NAME }}
-          name: ${{ env.RELEASE_TITLE }}
-          body: |
-            ## ZyteKernel for Redmi 10 Prime (selene)
-
-            | Property    | Value                          |
-            |-------------|--------------------------------|
-            | ROM Type    | `${{ env.ROM_TYPE }}`          |
-            | Branch      | `${{ env.BRANCH }}`            |
-            | KernelSU    | `${{ env.KSU_VER }}`           |
-            | NoMount     | `${{ env.NOMOUNT_VER }}`       |
-            | SUSFS       | `${{ env.SUSFS_VER }}`         |
-            | Build Date  | `${{ env.BUILD_DATE }}`        |
-            | Device      | Redmi 10 Prime (selene)        |
-
-            ### Flash Instructions
-            1. Boot into OrangeFox / TWRP
-            2. Flash this zip
-            3. Reboot system
-
-            > ⚠️ Enable OrangeFox auto-reflash recovery after zip flash to preserve recovery.
-          files: ${{ env.ZIP_NAME }}
-          draft: false
-          prerelease: false
+          name: Zyte-Kernel-${{ inputs.build_variant }}-AnyKernel3
+          path: Zyte-Kernel-${{ inputs.build_variant }}-AnyKernel3.zip
+          if-no-files-found: error
