@@ -83,7 +83,7 @@ jobs:
           
           echo "Generating base config..."
           make ARCH=arm64 O=out vendor/mt6768_defconfig
-          cat vendor/selene.config >> out/.config
+          cat arch/arm64/configs/vendor/selene.config >> out/.config
           make ARCH=arm64 O=out olddefconfig
           
           echo "Compiling Base Kernel..."
@@ -112,7 +112,7 @@ jobs:
           
           echo "Generating KSU config..."
           make ARCH=arm64 O=out vendor/mt6768_defconfig
-          cat vendor/selene.config >> out/.config
+          cat arch/arm64/configs/vendor/selene.config >> out/.config
           echo "CONFIG_KSU=y" >> out/.config
           echo "CONFIG_KSU_HACK_ARM64_BRANCH_LINK=y" >> out/.config
           make ARCH=arm64 O=out olddefconfig
@@ -144,7 +144,7 @@ jobs:
           
           echo "Generating KSU + NoMount config..."
           make ARCH=arm64 O=out vendor/mt6768_defconfig
-          cat vendor/selene.config >> out/.config
+          cat arch/arm64/configs/vendor/selene.config >> out/.config
           echo "CONFIG_KSU=y" >> out/.config
           echo "CONFIG_KSU_HACK_ARM64_BRANCH_LINK=y" >> out/.config
           echo "CONFIG_NOMOUNT=y" >> out/.config
