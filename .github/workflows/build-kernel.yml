@@ -1,0 +1,210 @@
+name: Build Zyte Kernel
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Runs every Sunday at 00:00 UTC
+    - cron: '0 0 * * 0'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180 # Increased timeout just in case
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Kernel Source
+        uses: actions/checkout@v4
+
+      - name: Get Build Date
+        id: date
+        run: echo "BUILD_DATE=$(date +'%Y%m%d-%H%M')" >> $GITHUB_ENV
+
+      - name: Free up disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: false
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: false
+
+      - name: Add Swap Space
+        run: |
+          sudo fallocate -l 8G /mnt/swapfile
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+          free -h
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            bc bison build-essential ccache cpio curl device-tree-compiler flex \
+            git libelf-dev libssl-dev lz4 make python3 rsync unzip zip zstd \
+            libncurses-dev gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
+
+      - name: Cache Clang Toolchain
+        id: cache-clang
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/toolchain
+          key: clang-r450784e-v3 # Bumped version to force a fresh download
+
+      - name: Download Clang Toolchain
+        if: steps.cache-clang.outputs.cache-hit != 'true'
+        run: |
+          echo "Clang not found in cache, downloading..."
+          # Create the specific folder FIRST
+          mkdir -p ${{ github.workspace }}/toolchain/clang-r450784e
+          cd ${{ github.workspace }}/toolchain/clang-r450784e
+          
+          curl -fL -o clang.tar.gz https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master-kernel-build-2022/clang-r450784e.tar.gz
+          
+          echo "Extracting Clang..."
+          tar -xzf clang.tar.gz
+          rm clang.tar.gz
+          
+          echo "Verifying Clang installation..."
+          ls -la ${{ github.workspace }}/toolchain/clang-r450784e/bin/clang
+
+      - name: Set Toolchain Path
+        run: echo "CLANG_PATH=${{ github.workspace }}/toolchain/clang-r450784e/bin" >> $GITHUB_ENV
+
+      - name: Setup Ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: zyte-kernel-all-variants
+          max-size: 3G
+
+      # =====================================================================
+      # BUILD 1: BASE KERNEL
+      # =====================================================================
+      - name: Build Base Kernel
+        run: |
+          export PATH="$CLANG_PATH:$PATH"
+          mkdir -p releases
+          
+          echo "Generating base config..."
+          make ARCH=arm64 O=out vendor/mt6768_defconfig
+          cat arch/arm64/configs/vendor/selene.config >> out/.config
+          make ARCH=arm64 O=out olddefconfig
+          
+          # Construct the localversion string
+          export LOCALVERSION="-zyte-base-${BUILD_DATE}"
+          echo "Compiling Base Kernel with version: $LOCALVERSION"
+          
+          make ARCH=arm64 O=out -j$(nproc) CC="ccache clang" CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- LOCALVERSION="$LOCALVERSION"
+          
+          echo "Packaging Base..."
+          rm -f Zyte-Kernel/Image.gz* Zyte-Kernel/dtb
+          cp out/arch/arm64/boot/Image.gz-dtb Zyte-Kernel/ || cp out/arch/arm64/boot/Image.gz Zyte-Kernel/
+          cp out/arch/arm64/boot/dts/mediatek/mt6768.dtb Zyte-Kernel/dtb
+          
+          cd Zyte-Kernel
+          zip -r9 "../releases/Zyte-Kernel-base-${BUILD_DATE}.zip" *
+          cd ..
+
+      # =====================================================================
+      # BUILD 2: KERNELSU ONLY
+      # =====================================================================
+      - name: Integrate KernelSU
+        run: |
+          curl -LSs "https://raw.githubusercontent.com/backslashxx/KernelSU/master/kernel/setup.sh" | bash -
+
+      - name: Build KSU Kernel
+        run: |
+          export PATH="$CLANG_PATH:$PATH"
+          KSU_VER=$(git -C KernelSU describe --tags --always)
+          
+          echo "Generating KSU config..."
+          make ARCH=arm64 O=out vendor/mt6768_defconfig
+          cat arch/arm64/configs/vendor/selene.config >> out/.config
+          echo "CONFIG_KSU=y" >> out/.config
+          echo "CONFIG_KSU_HACK_ARM64_BRANCH_LINK=y" >> out/.config
+          make ARCH=arm64 O=out olddefconfig
+          
+          # Construct the localversion string
+          export LOCALVERSION="-zyte-ksu-${KSU_VER}-${BUILD_DATE}"
+          echo "Compiling KSU Kernel with version: $LOCALVERSION"
+          
+          make ARCH=arm64 O=out -j$(nproc) CC="ccache clang" CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- LOCALVERSION="$LOCALVERSION"
+          
+          echo "Packaging KSU..."
+          rm -f Zyte-Kernel/Image.gz* Zyte-Kernel/dtb
+          cp out/arch/arm64/boot/Image.gz-dtb Zyte-Kernel/ || cp out/arch/arm64/boot/Image.gz Zyte-Kernel/
+          cp out/arch/arm64/boot/dts/mediatek/mt6768.dtb Zyte-Kernel/dtb
+          
+          cd Zyte-Kernel
+          zip -r9 "../releases/Zyte-Kernel-KernelSU-${KSU_VER}-${BUILD_DATE}.zip" *
+          cd ..
+
+      # =====================================================================
+      # BUILD 3: KERNELSU + NOMOUNT
+      # =====================================================================
+      - name: Integrate NoMount
+        run: |
+          curl https://raw.githubusercontent.com/maxsteeel/nomount/refs/heads/dev/kernel/setup.sh | bash -s dev
+
+      - name: Build KSU + NoMount Kernel
+        run: |
+          export PATH="$CLANG_PATH:$PATH"
+          KSU_VER=$(git -C KernelSU describe --tags --always)
+          NOMOUNT_VER=$(git -C NoMount describe --tags --always)
+          
+          echo "Generating KSU + NoMount config..."
+          make ARCH=arm64 O=out vendor/mt6768_defconfig
+          cat arch/arm64/configs/vendor/selene.config >> out/.config
+          echo "CONFIG_KSU=y" >> out/.config
+          echo "CONFIG_KSU_HACK_ARM64_BRANCH_LINK=y" >> out/.config
+          echo "CONFIG_NOMOUNT=y" >> out/.config
+          make ARCH=arm64 O=out olddefconfig
+          
+          # Construct the localversion string
+          export LOCALVERSION="-zyte-ksu-${KSU_VER}-nomount-${BUILD_DATE}"
+          echo "Compiling KSU + NoMount Kernel with version: $LOCALVERSION"
+          
+          make ARCH=arm64 O=out -j$(nproc) CC="ccache clang" CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- LOCALVERSION="$LOCALVERSION"
+          
+          echo "Packaging KSU + NoMount..."
+          rm -f Zyte-Kernel/Image.gz* Zyte-Kernel/dtb
+          cp out/arch/arm64/boot/Image.gz-dtb Zyte-Kernel/ || cp out/arch/arm64/boot/Image.gz Zyte-Kernel/
+          cp out/arch/arm64/boot/dts/mediatek/mt6768.dtb Zyte-Kernel/dtb
+          
+          cd Zyte-Kernel
+          zip -r9 "../releases/Zyte-Kernel-KernelSU-${KSU_VER}-NoMount-${NOMOUNT_VER}-${BUILD_DATE}.zip" *
+          cd ..
+      # =====================================================================
+      # UPLOAD & RELEASE
+      # =====================================================================
+      - name: Upload Artifacts to Action
+        uses: actions/upload-artifact@v4
+        with:
+          name: Zyte-Kernel-Builds-${{ env.BUILD_DATE }}
+          path: releases/*.zip
+          if-no-files-found: error
+
+      - name: Publish All to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: zyte-kernel-build-${{ env.BUILD_DATE }}
+          name: Zyte Kernel Build - ${{ env.BUILD_DATE }}
+          body: |
+            Automated weekly build for **Zyte Kernel (Redmi 10 / selene)**.
+            
+            **Date**: `${{ env.BUILD_DATE }}`
+            **Source Commit**: `${{ github.sha }}`
+            
+            ### Included Variants:
+            * **Base**: Pure kernel, no root.
+            * **KernelSU**: Includes backslashxx's KernelSU integration.
+            * **KernelSU + NoMount**: Includes KernelSU and NoMount VFS hiding.
+            
+            Flash the `.zip` via a custom recovery (TWRP/OrangeFox).
+          files: releases/*.zip
+          draft: false
+          prerelease: false
