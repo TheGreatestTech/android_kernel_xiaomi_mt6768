@@ -17,10 +17,16 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout Kernel Source
         uses: actions/checkout@v4
+
+      - name: Get Build Date
+        id: date
+        run: echo "BUILD_DATE=$(date +'%Y%m%d-%H%M')" >> $GITHUB_ENV
 
       - name: Free up disk space
         uses: jlumbroso/free-disk-space@main
@@ -74,7 +80,7 @@ jobs:
           echo "CLANG_PATH=${{ github.workspace }}/toolchain/clang-r450784e/bin" >> $GITHUB_ENV
 
       # ---------------------------------------------------------
-      # INTEGRATIONS (Conditional based on inputs)
+      # INTEGRATIONS
       # ---------------------------------------------------------
       - name: Integrate backslashxx KernelSU
         if: inputs.build_variant == 'ksu' || inputs.build_variant == 'ksu_nomount'
@@ -87,6 +93,39 @@ jobs:
         run: |
           echo "Integrating NoMount..."
           curl https://raw.githubusercontent.com/maxsteeel/nomount/refs/heads/dev/kernel/setup.sh | bash -s dev
+
+      # ---------------------------------------------------------
+      # DYNAMIC VERSION EXTRACTION & FILENAME BUILDER
+      # ---------------------------------------------------------
+      - name: Get Integration Versions
+        run: |
+          # Initialize version strings as empty
+          KSU_VER=""
+          NOMOUNT_VER=""
+          
+          # Extract KernelSU commit hash if folder exists
+          if [ -d "KernelSU" ]; then
+            KSU_VER=$(git -C KernelSU describe --tags --always)
+            echo "Found KernelSU Version/Commit: $KSU_VER"
+          fi
+          
+          # Extract NoMount commit hash if folder exists
+          if [ -d "NoMount" ]; then
+            NOMOUNT_VER=$(git -C NoMount describe --tags --always)
+            echo "Found NoMount Version/Commit: $NOMOUNT_VER"
+          fi
+          
+          # Construct the final filename based on the variant
+          if [ "${{ inputs.build_variant }}" == "base" ]; then
+            FILENAME="Zyte-Kernel-base-${BUILD_DATE}"
+          elif [ "${{ inputs.build_variant }}" == "ksu" ]; then
+            FILENAME="Zyte-Kernel-KernelSU-${KSU_VER}-${BUILD_DATE}"
+          elif [ "${{ inputs.build_variant }}" == "ksu_nomount" ]; then
+            FILENAME="Zyte-Kernel-KernelSU-${KSU_VER}-NoMount-${NOMOUNT_VER}-${BUILD_DATE}"
+          fi
+          
+          echo "Final Filename will be: $FILENAME.zip"
+          echo "FILENAME=$FILENAME" >> $GITHUB_ENV
 
       # ---------------------------------------------------------
       # CACHE 2: Ccache for Object Files
@@ -107,7 +146,6 @@ jobs:
           echo "Appending fragment (vendor/selene.config)..."
           cat vendor/selene.config >> out/.config
           
-          # Conditionally append KSU and NoMount flags
           if [ "${{ inputs.build_variant }}" == "ksu" ] || [ "${{ inputs.build_variant }}" == "ksu_nomount" ]; then
             echo "Appending KSU flags..."
             echo "CONFIG_KSU=y" >> out/.config
@@ -125,24 +163,45 @@ jobs:
           echo "Compiling kernel with ccache..."
           make ARCH=arm64 O=out -j$(nproc) CC="ccache clang" CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi-
 
-      - name: Package with AnyKernel3
+      - name: Package with Custom AnyKernel3
         run: |
-          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git anykernel
-          
+          echo "Copying compiled kernel image to Zyte-Kernel folder..."
           if [ -f "out/arch/arm64/boot/Image.gz-dtb" ]; then
-            cp out/arch/arm64/boot/Image.gz-dtb anykernel/
+            cp out/arch/arm64/boot/Image.gz-dtb Zyte-Kernel/
           elif [ -f "out/arch/arm64/boot/Image.gz" ]; then
-            cp out/arch/arm64/boot/Image.gz anykernel/
+            cp out/arch/arm64/boot/Image.gz Zyte-Kernel/
           else
-            cp out/arch/arm64/boot/Image anykernel/
+            cp out/arch/arm64/boot/Image Zyte-Kernel/
           fi
           
-          cd anykernel
-          zip -r9 ../Zyte-Kernel-${{ inputs.build_variant }}-AnyKernel3.zip *
+          echo "Copying and renaming mt6768.dtb..."
+          if [ -f "out/arch/arm64/boot/dts/mediatek/mt6768.dtb" ]; then
+            cp out/arch/arm64/boot/dts/mediatek/mt6768.dtb Zyte-Kernel/dtb
+          else
+            find out/arch/arm64/boot/dts/mediatek/ -name "mt6768*.dtb" -exec cp {} Zyte-Kernel/dtb \;
+          fi
+          
+          echo "Creating flashable zip..."
+          cd Zyte-Kernel
+          zip -r9 "../${FILENAME}.zip" *
 
-      - name: Upload Flashable Zip
+      - name: Upload Flashable Zip (Artifact)
         uses: actions/upload-artifact@v4
         with:
-          name: Zyte-Kernel-${{ inputs.build_variant }}-AnyKernel3
-          path: Zyte-Kernel-${{ inputs.build_variant }}-AnyKernel3.zip
+          name: ${{ env.FILENAME }}
+          path: ${{ env.FILENAME }}.zip
           if-no-files-found: error
+
+      - name: Publish to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.FILENAME }}
+          name: Zyte Kernel (${{ inputs.build_variant }}) - ${{ env.BUILD_DATE }}
+          body: |
+            **Variant**: `${{ inputs.build_variant }}`
+            **Date**: `${{ env.BUILD_DATE }}`
+            **KernelSU Version**: `${{ env.KSU_VER }}`
+            **NoMount Version**: `${{ env.NOMOUNT_VER }}`
+            
+            Built automatically from commit `${{ github.sha }}`.
+          files: ${{ env.FILENAME }}.zip
