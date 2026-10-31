@@ -53,16 +53,24 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/toolchain
-          key: clang-r450784e-v1
+          key: clang-r450784e-v3 # Bumped version to force a fresh download
 
       - name: Download Clang Toolchain
         if: steps.cache-clang.outputs.cache-hit != 'true'
         run: |
-          mkdir -p ${{ github.workspace }}/toolchain
-          cd ${{ github.workspace }}/toolchain
-          curl -L -o clang.tar.gz https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master-kernel-build-2022/clang-r450784e.tar.gz
+          echo "Clang not found in cache, downloading..."
+          # Create the specific folder FIRST
+          mkdir -p ${{ github.workspace }}/toolchain/clang-r450784e
+          cd ${{ github.workspace }}/toolchain/clang-r450784e
+          
+          curl -fL -o clang.tar.gz https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master-kernel-build-2022/clang-r450784e.tar.gz
+          
+          echo "Extracting Clang..."
           tar -xzf clang.tar.gz
           rm clang.tar.gz
+          
+          echo "Verifying Clang installation..."
+          ls -la ${{ github.workspace }}/toolchain/clang-r450784e/bin/clang
 
       - name: Set Toolchain Path
         run: echo "CLANG_PATH=${{ github.workspace }}/toolchain/clang-r450784e/bin" >> $GITHUB_ENV
